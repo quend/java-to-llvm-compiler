@@ -1,0 +1,44 @@
+
+public class Obj_Int{
+
+    int n;
+
+    public Obj_Int(int i){
+	n = i;
+    }
+
+    public int getInt(){
+	return n;
+    }
+}
+
+public class Array{
+
+  int max ( Int[] a, int n) 
+  {
+  	int i, max, c;
+  	i = 0;
+  	max = -10000;
+  	while(i < n) { c = a[i].getInt();
+			   if(c > max) max = c;
+			   i = i +1;
+  	}
+  	return max;
+  }
+
+  public void main () 
+  {
+  	Obj_Int[] a;
+	int i, n;
+  	a = new Obj_Int[5];
+  	i = 0;
+  	while(i < 5) 
+	{ 
+		printf ("Enter an integer value: ");
+        	scanf ("%d", &n);
+		a[i] = new Obj_Int(n);
+		i = i +1;
+  	}
+  	printf ("max:  %d\n", max(a, 5));
+  }
+}

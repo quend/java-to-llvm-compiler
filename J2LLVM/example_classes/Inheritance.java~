@@ -1,0 +1,53 @@
+public class Number 
+{
+    float f;
+    boolean b;
+
+    public Number(float x){
+	f = x;
+    }
+}
+
+public class Obj_Int extends Number 
+{
+    int n;
+
+    public Obj_Int(int i)
+    {
+	super(3.5);
+	n = i;
+    }
+}
+
+public class Fact extends Obj_Int 
+{
+    int m;
+    public Fact(int i)
+    {
+	super(i);
+	m = 2;
+    }
+    public int f() 
+    {
+	return m + fact(n);
+    }
+
+    int fact(int n) 
+    {
+	return n > 2 ? n * fact(n -1) : n;
+    }
+}
+
+public class Test {
+    public void main(){
+	int n, f;
+	Fact t;
+	n = 0;
+	while(n < 1 || n > 16) { printf ("Enter an integer greater than 0 and less than 17: ");	
+		    			 scanf ("%d", &n);
+	}
+	t = new Fact(n);
+	f = t.f();	
+	printf("2 + factorial(%d)= %d\n", n, f);
+    } 
+}

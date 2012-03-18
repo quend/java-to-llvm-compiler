@@ -1,0 +1,16 @@
+public class String{
+}
+
+public class Geom{
+
+    public void main(){
+	int n, f;
+	float circ;
+	n = -1;
+	while(n < 0) { printf ("Enter a positive integer: ");	
+		    	   scanf ("%d", &n);
+	}
+	circ = 3.1415926 * n * 2;	
+	printf("circumference of radius(%d) = %f\n", n, circ);
+    } 
+}

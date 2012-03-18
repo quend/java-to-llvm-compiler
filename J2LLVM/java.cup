@@ -1,0 +1,2049 @@
+// Nataraj Sundar : CIS 748 Compiler Design, fall 2009 
+
+import java_cup.runtime.*;
+import java.io.*;
+import java.util.*;
+import backend.symboltable.*;
+import backend.symboltable.objects.*;
+
+parser code  {: 
+
+  public static Scanner s;
+  public static int errors = 0;
+  public static int warnings = 0;
+  public static boolean first = true, second = false;
+  public static StringBuffer code = new StringBuffer();
+  public static String objLoc = "null";
+
+  public static void main(String argv[]) {
+
+    for (int i = 0; i < argv.length; i++) {
+      try {// System.out.println("\n... Creating Symbol-Table for \""+argv[i]+"\" ...\n");
+	  	s = new Scanner(new FileReader(argv[i]));
+        	mjavac p = new mjavac(s);
+        	p.parse();
+        	//System.out.println("Number of errors = " + errors + ".");
+        	//System.out.println("Number of warnings = " + warnings + ".");
+		Type.printTypes();
+	  	first = false;
+	  	second = true;
+        	//System.out.println("\n... Generating intermediate code for \""+argv[i]+"\" ...\n");
+		code.append("		; ModuleID = '"+argv[i]+".ll'\n\n");
+		code.append("target datalayout = \"e-p:32:32:32-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:32:64-f32:32:32-f64:32:64-v64:64:64-v128:128:128-a0:0:64-s0:0:64-f80:32:32\"\n");
+		code.append("target triple = \"i686-pc-linux-gnu\"\n\n");
+		code.append("		; Global values\n");
+		Set glob = Env.getGlobals().entrySet();
+  		Iterator it = glob.iterator();
+		while(it.hasNext()) { Map.Entry entry = (Map.Entry)it.next();
+					    String key = (String)entry.getKey();
+					    String value = (String)entry.getValue();
+					    if (value.equals("struct")) code.append(key+"\n");
+					    else { int lth = key.length() + 1;
+						     code.append(value+" = internal constant ["+lth+" x i8] "+" c\""+key+"\\00\"\n");
+					    }
+		}
+		code.append("\n");
+		code.append("		; External declarations\n");
+		code.append("declare i32 @printf(i8*, ...)\n");
+		code.append("declare i32 @scanf(i8*, ...)\n\n");
+        	s = new Scanner(new FileReader(argv[i]));
+	  	p = new mjavac(s);
+        	p.parse();
+        	//System.out.println("Number of errors = " + errors + ".");
+        	//System.out.println("Number of warnings = " + warnings + ".");
+		Type.printTypes();
+	  	if (errors == 0) try { FileOutputStream  fStream;
+   					     PrintWriter  myStream;
+   			      	     fStream = new FileOutputStream(argv[i]+".ll");
+   					     myStream = new PrintWriter(fStream);
+   					     myStream.println(code); 
+   					     myStream.flush();
+   					     myStream.close();
+        				     //System.out.println("\nCode written to \""+argv[i]+".ll\".");
+				     }
+				     catch (IOException e) { e.printStackTrace(System.out);
+        			    				     System.exit(1);
+      			     }
+		else System.out.println("\nNo code produced.");
+		//System.out.println("--------------------------------------- (mjavac)");
+      }
+      catch (Exception e) { e.printStackTrace(System.out);
+        			    System.exit(1);
+      }
+    }
+  }
+  
+  public void report_error(String message, Object info) {
+    if (info instanceof String){
+	errors++; 
+      System.err.println("  "+ errors + "==> " + info + " "+ message + 
+					"\n       Parsing resumed from 2nd token before" + s.current_lexeme()+"\n");
+    }
+    else {
+    	StringBuffer m = new StringBuffer("Error ");
+    	if (info instanceof java_cup.runtime.Symbol) 
+     	   m.append( "("+info.toString()+")" );     
+    	m.append(" : "+message);   
+    	System.err.println(m);
+    }
+  }
+
+  public void sem_error(String lexeme, String message) {
+	errors++;
+     	System.err.println("Error "+ s.current_lexeme() + " : Semantic error");
+      System.err.println("  "+ errors + "==> " + message + ": "+ lexeme + "\n");
+  }
+
+  public void warning(String lexeme, String message) {
+	warnings++;
+     	System.err.println("Warning "+ s.current_lexeme());
+      System.err.println("  "+ warnings + "==> " + message + ": "+ lexeme + "\n");
+  } 
+  
+  public void report_fatal_error(String message, Object info) {
+    	report_error(message, info);
+    	throw new RuntimeException("Fatal Syntax Error");
+  }
+
+:};
+
+action code {:
+
+	class Sname {
+	  public String name;
+	  public Symb cs;
+	  public Symb rs;
+
+	  Sname(String n, Symb c, Symb r) {
+		name = n;
+		cs = c;
+		rs = r;
+	  }
+
+	  public String toString(){
+		return "Sname["+name+", "+cs+", "+rs+"]";
+	  }
+	}
+
+	class Exp {
+	  public Type type;
+	  public String locT;
+	  public String locN;
+	  public Labels lab;
+
+	  Exp(Type t, String lt, String ln) {
+		type = t;
+		locT = lt;
+		locN = ln;
+	  }
+
+	  Exp(Type t, Labels l) {
+		type = t;
+		lab = l;
+	  }
+
+	  Exp(Type t, String lt, String ln, Labels l) {
+		type = t;
+		locT = lt;
+		locN = ln;
+		lab = l;
+	  }
+
+  	  public void load () {
+		if(locN.startsWith("getelementptr")) { parser.code.append("	"+Tmp.nv()+" = "+locN+"\n");
+								   locN = Tmp.lv();
+		}
+		if(locT.endsWith("*") && !locT.startsWith("%struct")) { parser.code.append("	"+Tmp.nv()+" = load "+locT+" "+locN+"\n");
+					   	 					  locT = locT.replaceFirst("\\*", "");
+					   	 					  locN = Tmp.lv();
+		}
+  	  }
+
+  	  public String widen(Type w) {
+		if(type == w) return locN;
+ 		if(type.isInteger() && w.isFloating()) parser.code.append("	"+Tmp.nv()+" = sitofp i32 "+locN+" to double\n");
+ 		if(type.isCharacter() && w.isFloating()) parser.code.append("	"+Tmp.nv()+" = sitofp i8 "+locN+" to double\n");
+ 		if(type.isCharacter() && w.isInteger()) parser.code.append("	"+Tmp.nv()+" = sext i8 "+locN+" to i32\n");
+		return Tmp.lv();
+  	  }
+
+	}
+
+	class ParamList {
+	  public Type type;
+	  public List list;
+
+	  ParamList(Type t, List l) {
+		type = t;
+		list = l;
+	  }
+	}
+
+	class Labels {
+	  public String lBegin;
+	  public String lTrue;
+	  public String lFalse;
+	  public String lNext;
+	  public boolean bvalue;
+	  public boolean bvDone;
+
+	  Labels() {
+		lBegin = Tmp.nl();
+		lTrue = Tmp.nl();
+		lFalse = Tmp.nl();
+		lNext = Tmp.nl();
+		bvalue = false;
+		bvDone = false;
+	  }
+	}
+
+	class Vars {
+	  public Env e;
+	  public List vl;
+
+	  Vars(Env ee, List l) {
+		e = ee;
+		vl = l;
+	  }
+	}
+
+:};
+
+init with {:
+	if(first) {	Type.initTypes();
+			Env.initFirst();
+	}
+	if(second) Env.initSecond();
+:};
+
+terminal BOOLEAN; // primitive_type
+terminal INT, CHAR, FLOAT; // numeric_type
+terminal LBRACK, RBRACK; // array_type
+terminal DOT; // qualified_name
+terminal SEMICOLON, MULT, COMMA, LBRACE, RBRACE, EQ, LPAREN, RPAREN, COLON;
+terminal PUBLIC; // modifier
+terminal CLASS; // class_declaration
+terminal EXTENDS; // super
+terminal VOID; // method_header
+terminal THIS, SUPER; // explicit_constructor_invocation
+terminal AT; // reference operator
+terminal IF, ELSE; // if_then_statement, if_then_else_statement
+terminal WHILE; // while_statement, do_statement
+terminal RETURN; // return_statement
+terminal NEW; // class_instance_creation_expression
+terminal PLUS, MINUS, NOT, DIV, MOD;
+terminal LT, GT, LTEQ, GTEQ; // relational_expression
+terminal EQEQ, NOTEQ; // equality_expression
+terminal ANDAND; // conditional_and_expression
+terminal OROR; // conditional_or_expression
+terminal QUESTION; // conditional_expression
+terminal ILLEGAL_CHARACTER; // illegal_character
+
+terminal java.lang.Number INTEGER_LITERAL;
+terminal java.lang.Number FLOATING_POINT_LITERAL;
+terminal java.lang.Boolean BOOLEAN_LITERAL;
+terminal java.lang.Character CHARACTER_LITERAL;
+terminal java.lang.String STRING_LITERAL;
+terminal java.lang.String IDENTIFIER; // name
+terminal NULL_LITERAL;
+
+
+// 1) The Syntactic Grammar
+non terminal goal;
+
+// 2) Lexical Structure
+non terminal Exp literal;
+
+// 3) Types, Values, and Variables
+non terminal Type type, primitive_type, numeric_type;
+non terminal Type reference_type;
+non terminal Type array_type;
+
+// 4) Names
+non terminal Sname name;
+non terminal Type M1;
+
+// 5) Classes
+non terminal class_declarations;
+
+// 5.1) Class Declaration
+non terminal class_declaration;
+non terminal class_body, class_body_opt;
+non terminal Boolean modifiers_opt;
+non terminal class_body_declarations, class_body_declarations_opt;
+non terminal class_body_declaration, class_member_declaration;
+
+// 5.2) Field Declarations
+non terminal field_declaration, variable_declarators;
+non terminal String variable_declarator_id;
+
+// 5.3) Method Declarations
+non terminal method_declaration, M3;
+non terminal Type method_header;
+non terminal ParamList formal_parameter_list_opt, formal_parameter_list;
+non terminal String formal_parameter;
+non terminal method_body;
+
+// 5.4) Constructor Declarations
+non terminal constructor_declaration;
+non terminal Type constructor_declarator;
+non terminal constructor_body;
+non terminal explicit_constructor_invocation;
+
+// 6) Blocks and Statements
+non terminal block, M2;
+non terminal block_statements_opt, block_statements, block_statement;
+non terminal local_variable_declaration_statement;
+non terminal statement, statement_no_short_if;
+non terminal statement_without_trailing_substatement;
+non terminal empty_statement;
+non terminal expression_statement, statement_expression;
+non terminal if_then_statement;
+non terminal if_then_else_statement, if_then_else_statement_no_short_if;
+non terminal while_statement, while_statement_no_short_if;
+non terminal return_statement;
+
+// 7) Expressions
+non terminal Exp primary, primary_no_new_array;
+non terminal Exp class_instance_creation_expression;
+non terminal ParamList argument_list_opt, argument_list;
+non terminal Exp array_creation_expression;
+non terminal Exp dim_exprs, dim_expr, dims_opt;
+non terminal dims;
+non terminal Labels M4, M5, M6, M7, M8, M9, M10, M11, M12, M13, M14;
+non terminal Exp field_access, method_invocation, array_access;
+non terminal Exp postfix_expression;
+non terminal Exp unary_expression;
+non terminal Exp multiplicative_expression, additive_expression;
+non terminal Exp relational_expression, equality_expression;
+non terminal Exp conditional_and_expression, conditional_or_expression;
+non terminal Exp conditional_expression, assignment_expression;
+non terminal Exp assignment;
+non terminal Exp left_hand_side;
+non terminal Exp expression_opt, expression;
+
+
+start with goal;
+
+// 1) The Syntactic Grammar
+goal ::=
+		class_declarations
+ 			{: Hashtable forwards;
+			   if(parser.first) { forwards = Name.ForwardHashtable();
+						    int err = forwards.size();
+						    if(err > 0) { parser.errors = parser.errors + err;
+     						    	     		System.err.println("Error : Semantic error");
+      					    	     		System.err.println("  ==> CANNOT FIND CLASSES ("+err+"): "+forwards+"\n");
+						    }
+			   }
+			:}
+	;
+
+// 2) Lexical Structure.
+literal ::=
+		INTEGER_LITERAL:l 
+			{: 
+			   RESULT = new Exp(Type.integer(), "i32", ""+l); 
+			:}
+	|	FLOATING_POINT_LITERAL:l
+			{: 
+			   RESULT = new Exp(Type.floating(), "double", ""+l); 
+			:}
+	|	BOOLEAN_LITERAL:l 
+			{: 
+			   RESULT = new Exp(Type.bool(), "i1", ""+l); 
+			:}
+	|	CHARACTER_LITERAL:l 
+			{: 
+			   RESULT = new Exp(Type.character(), "i8", ""+l); 
+			:}
+	|	STRING_LITERAL:l
+			{: 
+			   if(parser.first) Env.putGlobal(l , Tmp.ns());
+			   if(parser.second) { int i = l.length() + 1;
+			   			     String ary = "["+i+" x i8]";
+			   			     String tmp = Env.getGlobal(l);
+			   			     String loc = "i8* getelementptr ("+ary+"* "+tmp+", i32 0, i32 0)";
+			   			     Symb s = Env.get("String", Env.getRoot());
+			   			     if(s == null) RESULT = new Exp(Type.reference(Type.forwardName("String", parser.s.current_lexeme())), loc, ""); 
+			   			     else RESULT = new Exp(Type.reference(s.getType()), loc, ""); 
+			   }
+			:}
+	|	NULL_LITERAL
+			{: 
+			   RESULT = new Exp(Type.reference(Type.voidtype()), "", "null"); 
+			:}
+	;
+
+// 3) Types, Values, and Variables
+type	::=
+		primitive_type:t
+			{: RESULT = t; :}
+	|	reference_type:t
+			{: RESULT = t; :}
+	;
+primitive_type ::=
+		numeric_type:t
+			{: RESULT = t; :}
+	|	BOOLEAN
+			{: RESULT = Type.bool(); :}
+	;
+numeric_type ::= 
+		INT
+ 			{: RESULT = Type.integer(); :}
+	|	CHAR
+ 			{: RESULT = Type.character(); :}
+	|	FLOAT
+  			{: RESULT = Type.floating(); :}
+	;
+reference_type ::=
+		name:sn
+			{: Symb s = sn.rs; 
+			   if(s == null) RESULT = Type.reference(Type.forwardName(sn.name, parser.s.current_lexeme())); 
+			   else RESULT = Type.reference(s.getType());
+			:}
+	|	array_type:t
+			{: RESULT = t; :}
+	;
+array_type ::=
+		primitive_type:t dims
+			{: RESULT = Type.array(0, t); :}
+	|	name:sn dims
+			{: Symb s = sn.cs; 
+			   if(s == null) { parser.sem_error(sn.name,"UNKNOWN NAME");
+				    		 RESULT = Type.errortype();
+			   } 
+			   else RESULT = Type.array(0, Type.reference(s.getType()));
+			:}
+	;
+
+// 4) Names
+name	::=
+		IDENTIFIER:n
+			{: RESULT = new Sname(n, Env.get(n), Env.get(n, Env.getRoot())); :}			
+		|	name:sn DOT IDENTIFIER:n
+			{: Symb s1 = sn.cs;
+			   if(s1 == null) { parser.sem_error(sn.name, "UNKNOWN NAME");
+						  RESULT = new Sname(n, null, null);
+			   }
+			   else { Type t1 = s1.getType();
+				    if(!t1.isReference()) { parser.sem_error(""+t1, "NOT A REFERENCE");
+								    RESULT = new Sname(n, null, null);
+				    }
+				    else { Type r = ((Reference)t1).getReferred();
+					     if(!r.isName()) { parser.sem_error(""+r, "NOT A CLASS");
+								     RESULT = new Sname(n, null, null);
+					     }
+					     else { Symb s2 = Env.get(n, ((Name)r).getEnv()); 
+			   			     	if(s2 == null) { parser.sem_error(n,"UNKNOWN NAME"); 
+									     RESULT = new Sname(n, null, null);
+							}
+			   			     	else if (!s2.isPublic() && !Name.getCurrentClass().isSubclass(s2.getOwner())) { parser.sem_error(n, "ILLEGAL ACCESS TO PRIVATE ATTRIBUTE");
+				    					 				     			     	      		  RESULT = new Sname(n, null, null);
+						  	     }
+						  	     else { if(parser.second) { parser.code.append("		; name\n");
+												  parser.code.append("	"+Tmp.nv()+" = load "+s1.getLoc()+"\n");
+												  parser.objLoc = Tmp.lv();
+									}
+									RESULT = new Sname(n, s2, Env.get(n, Env.getRoot()));
+							     }
+					     }								
+				    }
+			   }
+			:}	
+	;
+
+modifiers_opt::=
+			{: RESULT = Boolean.valueOf(false); :}
+	|	PUBLIC
+			{: RESULT = Boolean.valueOf(true); :}
+	;
+
+// 5) Classes
+class_declarations ::= 
+	|	class_declarations class_declaration 
+	|	error
+			{: parser.report_error("class_declaration","WRONG"); :}
+		class_declaration
+	;
+
+// 5.1) Class Declaration
+class_declaration ::= 
+		modifiers_opt:m CLASS IDENTIFIER:n1 
+			{: //System.out.println("CLASS ENTRY: "+n1);
+			   if(parser.first) if (Env.putClass(n1, m.booleanValue()) != 0) parser.sem_error(n1,"DUPLICATE CLASS NAME");
+ 			   if(parser.second) { Env.next();
+						     Name c = Env.get(n1).getOwner();
+						     Name.putCurrentClass(c);
+			   } 
+			:}
+		class_body
+			{: //System.out.println("CLASS EXIT: "+n1);
+			   if(parser.first) { Env e = Env.getCurrent();
+						    List vars = e.getEvars();
+					          ListIterator l = vars.listIterator();
+						    int n = 0;
+						    String global = "%struct."+n1+" = type { ";
+						    boolean first = true;
+						    while(l.hasNext()) { String v = (String)l.next();
+									    	 Symb s = Env.get(v);
+									   	 String c = s.getType().getCode();
+									   	 s.putLocT(c + "*");
+									  	 s.putLocN("getelementptr %struct."+n1+"* %this, i32 0, i32 "+n);
+									   	 n++;
+									    	 if(first) { global = global + c;
+											       first = false;
+									   	 }
+									   	 else global = global + ", " + c;
+						    }
+						    global = global + " }";
+						    Env.putGlobal(global, "struct");
+						    Env.get(n1).putLocT(global.replace("%struct."+n1+" = ",""));	    				
+						    Env.pop();
+						  }
+			   if(parser.second) Env.next();
+			:}
+	|	modifiers_opt:m CLASS IDENTIFIER:n1 EXTENDS IDENTIFIER:n2
+			{: //System.out.println("CLASS ENTRY: "+n1);
+			   if(parser.first) switch (Env.putClass(n1, m.booleanValue(),n2)){ case 1: parser.sem_error(n1,"DUPLICATE CLASS NAME");
+							     								    break;
+													        case 2: parser.sem_error(n2,"UNKNOWN CLASS");
+					        }
+  			   if(parser.second) { Env.next();
+						     Env.next();
+						     Name c = Env.get(n1).getOwner();
+						     Name.putCurrentClass(c);
+			   }
+			:}
+		class_body
+			{: //System.out.println("CLASS EXIT: "+n1);
+			   if(parser.first) { List e_vars = new ArrayList();
+						    Env e = Env.getCurrent();
+						    e_vars.add(new Vars(e, e.getEvars()));
+ 						    Name cl = Env.get(n1).getOwner();
+						    String sup = cl.getSuper();
+						    while(sup != null){ cl = Env.get(sup).getOwner();
+										e = cl.getEnv();
+						    				e_vars.add(0, new Vars(e, e.getEvars()));
+										sup = cl.getSuper();
+						    }					    
+					          ListIterator evl = e_vars.listIterator();
+						    int n = 0;
+						    String global = "%struct."+n1+" = type { ";
+						    boolean first = true;
+						    while(evl.hasNext()){ Vars ev = (Vars)evl.next();
+										  ListIterator l = ev.vl.listIterator();										  
+						    				  while(l.hasNext()){ String v = (String)l.next();
+									    				    Symb s = Env.get(v, ev.e);
+									    				    String c = s.getType().getCode();
+									    				    s.putLocT(c + "*");
+									    				    s.putLocN("getelementptr %struct."+n1+"* %this, i32 0, i32 "+n);
+									    				    n++;
+									    				    if(first) { global = global + c;
+															    first = false;
+													    }
+													    else global = global + ", " + c;
+										  }
+						    }
+						    global = global + " }";
+						    Env.putGlobal(global, "struct");
+						    Env.get(n1).putLocT(global.replace("%struct."+n1+" = ",""));
+						    Env.pop();
+						    Env.pop();
+			   }
+			   if(parser.second) { Env.next();
+						     Env.next();
+			   }
+			:}
+	;
+class_body ::=
+		LBRACE class_body_declarations_opt RBRACE
+	;
+class_body_declarations_opt ::= 
+	|	class_body_declarations:w
+	;
+class_body_declarations ::= 
+		class_body_declaration
+	|	class_body_declarations class_body_declaration
+	;
+class_body_declaration ::=
+		class_member_declaration
+	|	constructor_declaration
+	|	block
+	;
+class_member_declaration ::=
+		field_declaration
+	|	method_declaration
+  	| 	SEMICOLON
+	;
+
+// 5.2) Field Declarations
+field_declaration ::= 
+		modifiers_opt type variable_declarators:w SEMICOLON
+	|	modifiers_opt type error 
+			{: parser.report_error("variable_declarators","WRONG"); :}
+		SEMICOLON 
+	|	modifiers_opt type error 
+			{: parser.report_error("field_declaration","WRONG"); :} 
+		method_declaration 
+	;
+variable_declarators ::=
+		variable_declarator_id
+	|	variable_declarators COMMA M1 variable_declarator_id
+	|	error 
+			{: parser.report_error("variable_declarator_id","WRONG"); :} 
+		COMMA variable_declarator_id
+	;
+M1 ::=
+			{: RESULT = (Type)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-2)).value; :}
+	;
+variable_declarator_id ::=
+		IDENTIFIER:n
+			{: if(parser.first) { Boolean m = (Boolean)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-2)).value;
+			   			    boolean mod = m == null ? false: m.booleanValue();	
+			  			    Type t = (Type)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-1)).value;
+			   			    Name c = Name.getCurrentClass();
+			   			    String cname = c.getName();
+			   			    Symb csymb = Env.get(cname);
+			   			    Symb s;
+			   			    if(csymb.isPublic()) s = new Symb(t, c, mod, t.getCode(), "%"+n);
+			   			    else { if(mod) parser.warning(n, "PUBLIC FIELD DECLARED IN PRIVATE CLASS");
+				    			     s = new Symb(t, c, false, t.getCode(), "%"+n);
+			   			    }
+			   			    if (!Env.putVar(n, s)) parser.sem_error(n,"DUPLICATE NAME");						    	
+			   }
+			   RESULT = n;
+			:}
+	|	variable_declarator_id LBRACK RBRACK
+	;
+
+// 5.3) Method Declarations
+method_declaration ::=
+		method_header:t method_body
+			{: if(parser.second) { parser.code.append("		; method_declaration\n");
+						     parser.code.append("	br label %return\n");
+						     parser.code.append("return:\n");
+						     if(t == Type.voidtype()) parser.code.append("	ret void\n"); 
+						     else { parser.code.append("	"+Tmp.nv()+" = load "+t.getCode()+"* %retval\n");
+						     	    parser.code.append("	ret "+t.getCode()+" "+Tmp.lv()+"\n");
+						     }
+						     parser.code.append("}\n\n");
+			   }
+			:}
+	;
+method_header ::=
+		modifiers_opt:m type:t1 IDENTIFIER:n 
+ 			{: if(parser.first) { if (!Env.put(n, null)) parser.sem_error(n,"DUPLICATE NAME");
+						   // System.out.println(" METHOD ENTRY: "+n);
+		 			          Env.push();
+			   }
+			   if(parser.second) { //System.out.println(" METHOD ENTRY: "+n);
+						     Env.next();
+						     parser.code.append("		; method_header\n");
+						     parser.code.append("define "+t1.getCode()+" @"+Name.getCurrentClass().getName()+"_"+n+"(");
+			   }
+			:}
+		LPAREN formal_parameter_list_opt:pL RPAREN
+			{: if(parser.first) { Name c = Name.getCurrentClass();
+			   			    String cname = c.getName();
+			   			    Symb csymb = Env.get(cname);
+			   			    Symb s;
+			   			    if(csymb.isPublic()) s = new Symb(Type.method(pL.type, t1), c, m.booleanValue());
+			   			    else { if(m.booleanValue()) parser.warning(n, "PUBLIC METHOD DECLARED IN PRIVATE CLASS");
+				    		           s = new Symb(Type.method(pL.type, t1), c, false);
+			   			    }
+			   			    Env.putSymb(n, s); 
+			   }
+			   if(parser.second) { Name c = Name.getCurrentClass();
+						     Symb msymb = Env.get(n, c.getEnv());
+						     Method.putCurrent(n, (Method)msymb.getType());
+						     String ptrt = "%struct."+c.getName()+"*";
+						     parser.code.append(ptrt+" %this");
+						     ListIterator l = pL.list.listIterator();
+						     while(l.hasNext()) { String p = (String)l.next();
+									        Symb s = Env.get(p);
+						                       	  Type t = s.getType();
+									        if(t.isArray()) { String tc = ((Array)t).getBase().getCode()+"*";
+												        parser.code.append(", "+tc+" "+s.getLocN());
+													  s.putLocT(tc);
+									        }
+									        else parser.code.append(", "+s.getLoc());
+						     } 
+						     parser.code.append(") {\nentry:\n");
+						     l = pL.list.listIterator();
+						     while(l.hasNext()) { String p = (String)l.next();
+										  Symb s = Env.get(p);
+										  Type t = s.getType();
+			   			     				  String tc;
+										  if(t.isArray()) tc = s.getLocT();
+										  else tc = t.getCode();
+						     				  parser.code.append("	%"+p+"_addr = alloca "+tc+"\n");
+						     				  parser.code.append("	store "+s.getLoc()+", "+tc+"* %"+p+"_addr\n");
+										  s.putLocT(tc+"*");
+										  s.putLocN("%"+p+"_addr");
+						     }
+						     parser.code.append("	%retval = alloca "+t1.getCode()+"\n");
+						     parser.code.append("	%tmp = alloca "+t1.getCode()+"\n");
+						     RESULT = t1;
+			   }
+			:}
+	|	modifiers_opt:m VOID IDENTIFIER:n 
+			{: if(parser.first) { if (!Env.put(n, null)) parser.sem_error(n,"DUPLICATE NAME");
+						    //System.out.println(" METHOD ENTRY: "+n);
+		 				    Env.push();
+			   }
+			   if(parser.second) { //System.out.println(" METHOD ENTRY: "+n);
+						     Env.next();
+						     parser.code.append("		; method_header\n");
+						     if(n.equals("main")) parser.code.append("define void @main(");
+					           else parser.code.append("define "+Type.voidtype().getCode()+" @"+Name.getCurrentClass().getName()+"_"+n+"(");
+			   }
+			:}
+		LPAREN formal_parameter_list_opt:pL RPAREN
+ 			{: if(parser.first) { Name c = Name.getCurrentClass();
+			   			    String cname = c.getName();
+			   			    Symb csymb = Env.get(cname);
+			   			    Symb s;
+			   			    if(csymb.isPublic()) s = new Symb(Type.method(pL.type, Type.voidtype()), c, m.booleanValue());
+			   			    else { if(m.booleanValue()) parser.warning(n, "PUBLIC METHOD DECLARED IN PRIVATE CLASS");
+				    		           s = new Symb(Type.method(pL.type, Type.voidtype()), c, false);
+			   			    }
+			   			    Env.putSymb(n, s);
+			   }
+			   if(parser.second) { Symb msymb = Env.get(n);
+						     Method.putCurrent(n, (Method)msymb.getType());
+						     String ptrt = "%struct."+Name.getCurrentClass().getName()+"*";
+						     if(!n.equals("main")) parser.code.append(ptrt+" %this");
+						     ListIterator l = pL.list.listIterator();
+						     while(l.hasNext()) { String p = (String)l.next();
+									        Symb s = Env.get(p);
+						                       	  Type t = s.getType();
+									        if(t.isArray()) { String tc = ((Array)t).getBase().getCode()+"*";
+												        parser.code.append(", "+tc+" "+s.getLocN());
+													  s.putLocT(tc);
+									        }
+									        else parser.code.append(", "+s.getLoc());
+						     }  
+						     parser.code.append(") {\nentry:\n");
+						     l = pL.list.listIterator();
+						     while(l.hasNext()) { String p = (String)l.next();
+										  Symb s = Env.get(p);
+										  Type t = s.getType();
+			   			     				  String tc;
+										  if(t.isArray()) tc = s.getLocT();
+										  else tc = t.getCode();
+						     				  parser.code.append("	%"+p+"_addr = alloca "+tc+"\n");
+						     				  parser.code.append("	store "+s.getLoc()+", "+tc+"* %"+p+"_addr\n");
+										  s.putLocT(tc+"*");
+										  s.putLocN("%"+p+"_addr");
+						     }
+						     RESULT = Type.voidtype();
+			   }
+			:}
+	|	error 
+			{: parser.report_error("method_header","WRONG");
+			   Env.push();
+ 			:} 
+		LPAREN formal_parameter_list_opt RPAREN
+	;
+formal_parameter_list_opt ::=
+			{: RESULT = new ParamList(Type.voidtype(), new ArrayList()); :}
+	|	formal_parameter_list:pL
+			{: RESULT = pL; :}
+	;
+formal_parameter_list ::=
+		formal_parameter:n
+ 			{: List l = new ArrayList();
+			   l.add(n);
+			   RESULT = new ParamList(Env.get(n).getType(), l); 
+			:}
+	|	formal_parameter_list:pL COMMA formal_parameter:n
+ 			{: pL.list.add(n);
+			   pL.type = Type.product(pL.type, Env.get(n).getType());
+			   RESULT = pL; 
+			:}
+	|	error 
+			{: parser.report_error("formal_parameter_list","WRONG"); :} 
+		formal_parameter
+	;
+formal_parameter ::=
+		type:t variable_declarator_id:n
+			{: if(parser.first) Env.remVar(n);
+			   RESULT = n; 
+			:}
+	;
+method_body ::=
+		LBRACE M3 block_statements_opt RBRACE
+   			{: //System.out.println(" METHOD EXIT");
+			   if(parser.first) Env.pop(); 
+			   if(parser.second) Env.next();
+			:}
+	|	LBRACE M3 error RBRACE
+			{: parser.report_error("block","WRONG");
+			   //System.out.println(" METHOD EXIT");
+			:}
+	|	SEMICOLON
+			{: //System.out.println(" METHOD EXIT");
+			   if(parser.first) Env.pop();
+			   if(parser.second) Env.next(); 
+			:}
+	;
+M3 ::= 
+   			{: if(parser.second) { ListIterator l = Env.getVars().listIterator();
+						     if(l.hasNext())parser.code.append("		; M3\n");
+						     while(l.hasNext()) { String p = (String)l.next();
+										  Symb s = Env.get(p);
+			   			     				  Type t = s.getType();
+										  if(!t.isArray()) { String tc = s.getType().getCode();										  
+						     				  			   parser.code.append("	%"+p+" = alloca "+tc+"\n");						     				  
+										  			   s.putLocT(tc+"*");
+										  			   s.putLocN("%"+p);
+										  }
+						     }
+			   }
+			:}
+	; 
+
+// 5.4) Constructor Declarations
+constructor_declaration ::=
+		constructor_declarator:t constructor_body
+			{: if(parser.second) { parser.code.append("		; constructor_declaration\n");
+					       parser.code.append("	br label %return\n");
+					       parser.code.append("return:\n");
+					       parser.code.append("	ret void\n");
+					       parser.code.append("}\n\n");
+			   } 
+			:}
+	;
+constructor_declarator ::=
+		modifiers_opt:m IDENTIFIER:n 
+			{: if(parser.first) { if (!Env.put(n, null)) parser.sem_error(n,"DUPLICATE NAME");
+						    else { Name c = Name.getCurrentClass();
+			   			    	     String cname = c.getName();
+						    	     if (!n.equals(cname)) parser.sem_error(n+", "+cname,"CONSTRUCTOR NAME DIFFERENT FROM CLASS NAME");
+						    }
+						   // System.out.println(" CONSTRUCTOR ENTRY: "+n);
+		 				    Env.push();
+			   }
+			   if(parser.second) {// System.out.println(" CONSTRUCTOR ENTRY: "+n);
+						     Env.next();
+						     Symb msymb = Env.get(n);
+						     Constructor c = (Constructor)msymb.getType();
+						     parser.code.append("		; constructor_declarator\n");
+						     parser.code.append("define "+Type.voidtype().getCode()+" @"+n+"(");
+			   }
+			:}
+		LPAREN formal_parameter_list_opt:pL RPAREN
+			{: if(parser.first) { Name c = Name.getCurrentClass();
+			   			    String cname = c.getName();
+			   			    Symb csymb = Env.get(cname);
+			   			    Symb s;
+			   			    if(csymb.isPublic()) s = new Symb(Type.constructor(pL.type, Type.reference(Type.getName(n))), c, m.booleanValue());
+			   			    else { if(m.booleanValue()) parser.warning(n, "PUBLIC CONSTRUCTOR DECLARED IN PRIVATE CLASS");
+				    		           s = new Symb(Type.constructor(pL.type, Type.reference(Type.getName(n))), c, false);
+			   			    }	
+			   			    Env.putSymb(n, s);
+			   }
+			   if(parser.second) { Symb msymb = Env.get(n);
+						     Constructor c = (Constructor)msymb.getType();
+						     Constructor.putCurrent(n, c);
+						     Type t2 = c.getRange();
+						     String ptrt = "%struct."+n+"*";
+						     parser.code.append(ptrt+" %this");
+						     ListIterator l = pL.list.listIterator();
+						     while(l.hasNext()) { String p = (String)l.next();
+									        Symb s = Env.get(p);
+						                       	  Type t = s.getType();
+									        if(t.isArray()) { String tc = ((Array)t).getBase().getCode()+"*";
+												        parser.code.append(", "+tc+" "+s.getLocN());
+													  s.putLocT(tc);
+									        }
+									        else parser.code.append(", "+s.getLoc());
+						     } 
+						     parser.code.append(") {\nentry:\n");
+						     l = pL.list.listIterator();
+						     while(l.hasNext()) { String p = (String)l.next();
+										  Symb s = Env.get(p);
+										  Type t = s.getType();
+			   			     				  String tc;
+										  if(t.isArray()) tc = s.getLocT();
+										  else tc = t.getCode();
+						     				  parser.code.append("	%"+p+"_addr = alloca "+tc+"\n");
+						     				  parser.code.append("	store "+s.getLoc()+", "+tc+"* %"+p+"_addr\n");
+										  s.putLocT(tc+"*");
+										  s.putLocN("%"+p+"_addr");
+						     }
+						     RESULT = t2;
+			   }
+			:}
+	;
+constructor_body ::=
+		LBRACE M3 explicit_constructor_invocation block_statements_opt RBRACE
+			{: //System.out.println(" CONSTRUCTOR EXIT");
+			   if(parser.first) Env.pop(); 
+			   if(parser.second) Env.next();
+			:}
+	|	LBRACE M3 block_statements_opt RBRACE
+   			{: //System.out.println(" CONSTRUCTOR EXIT");
+			   if(parser.first) Env.pop(); 
+			   if(parser.second) Env.next();
+			:}
+	|	LBRACE M3 error RBRACE
+   			{: parser.report_error("block","WRONG");
+			  // System.out.println(" CONSTRUCTOR EXIT");
+			   if(parser.first) Env.pop(); 
+			   if(parser.second) Env.next();  
+			:} 
+	;
+M2 ::= 
+   			{: //System.out.println(" BLOCK ENTRY");
+			   if(parser.first) Env.push(); 
+			   if(parser.second) { Env.next();
+						     ListIterator l = Env.getVars().listIterator();
+						     if(l.hasNext()) parser.code.append("		; M2\n");
+						     while(l.hasNext()) { String p = (String)l.next();
+										  Symb s = Env.get(p);
+			   			     				  Type t = s.getType();						     				 
+										  String tc = s.getType().getCode();										  
+						     				  parser.code.append("	%"+p+" = alloca "+tc+"\n");						     				  
+										  s.putLocT(tc+"*");
+										  s.putLocN("%"+p);
+						     }
+			   }
+			:}
+	;
+explicit_constructor_invocation ::=
+		THIS LPAREN argument_list_opt RPAREN SEMICOLON
+	|	SUPER LPAREN argument_list_opt:e2 RPAREN SEMICOLON
+			{: if(parser.second) { Name c = Name.getCurrentClass();
+						     String sup = c.getSuper();
+						     if(sup == null){ parser.sem_error(c.getName(), "NOT HAVING A SUPERCLASS");
+				   		     			    RESULT = new Exp(Type.errortype(), "", "");
+			   			     }
+						     else { Name sc = Env.get(sup).getOwner();
+								Env se = sc.getEnv();
+								Symb ss = Env.get(sup, se);
+								if(ss == null) { parser.sem_error(sup, "NOT HAVING A CONSTRUCTOR");
+				   		     			           RESULT = new Exp(Type.errortype(), "", "");
+			   			     		}
+								else { Type t1 = ss.getType();
+			   	    	     				 if(!t1.isConstructor()) { parser.sem_error(""+t1, "NOT A CONSTRUCTOR");
+				    			    	     		 		  	   RESULT = new Exp(Type.errortype(), "", "");
+			   	    	     			       } 
+									 else { parser.code.append("		; explicit_constructor_invocation_SUPER\n");
+										  ListIterator l = e2.list.listIterator();
+										  while (l.hasNext()) { Exp e = (Exp)l.next();
+											    			if(e.locT.contains("*")) if(e.locN.endsWith("&")) e.locN = e.locN.replace('&', ' ').trim(); 
+											    				     			 else if(e.type.isArray()) { String t = ((Array)e.type).getBase().getCode()+"*";
+																				   		     parser.code.append("	"+Tmp.nv()+" = bitcast "+e.locT+" "+e.locN+" to "+t+"\n");
+ 	    																			   		     e.locT = t;
+																				    		     e.locN = Tmp.lv();
+																    			}
+																    			else if(!e.locT.startsWith("i8* getelementptr")) { parser.code.append("	"+Tmp.nv()+" = load "+e.locT+" "+e.locN+"\n");
+																			         				     	      		e.locT = e.locT.replaceFirst("\\*", "");
+																								     	      		e.locN = Tmp.lv();
+											    								     }
+										  }
+			          	     				 	  if(((Constructor)t1).getDomain() != e2.type) { parser.sem_error(""+e2.type, "INCOMPATIBLE ARGUMENT IN CONSTRUCTOR INVOCATION "+sup);
+				    					 				  		     	    		 RESULT = new Exp(Type.errortype(), "", "");
+			   	  	   	    		     		  }
+					   	    		              else { parser.code.append("	"+Tmp.nv()+" = bitcast %struct."+c.getName()+"* %this to %struct."+sup+"*\n");
+											   parser.code.append("	call void @"+sup+"("+"%struct."+sup+"* "+Tmp.lv());
+										     	   l = e2.list.listIterator();
+										     	   while(l.hasNext()) { Exp pe = (Exp)l.next();
+											    		 	 	parser.code.append(", "+pe.locT+" "+pe.locN);
+										     	   }
+										     	   parser.code.append(")\n");
+											   RESULT = new Exp(((Constructor)t1).getRange(), "%struct."+sup+"*", Tmp.lv());
+									    	  }
+			 	    		     		      }
+			   			           }
+						    }
+			   }
+			   else RESULT = new Exp(Type.voidtype(), "", "");
+			:}
+	|	primary DOT THIS LPAREN argument_list_opt RPAREN SEMICOLON
+	|	primary DOT SUPER LPAREN argument_list_opt RPAREN SEMICOLON
+	;
+
+// 6) Blocks and Statements
+block ::=
+		LBRACE M2 block_statements_opt RBRACE
+   			{: //System.out.println(" BLOCK EXIT");
+			   if(parser.first) Env.pop(); 
+			   if(parser.second) Env.next();
+			:}		
+	|	LBRACE M2 error 
+			{: parser.report_error("block","WRONG");
+			  // System.out.println(" BLOCK EXIT");
+			   if(parser.first) Env.pop(); 
+			   if(parser.second) Env.next();
+ 			:} 
+		RBRACE  
+	;
+block_statements_opt ::=
+	|	block_statements
+	;
+block_statements ::=
+		block_statement
+	|	block_statements block_statement
+	|	error 
+			{: parser.report_error("block_statements","WRONG"); :} 
+		block_statement 
+	;
+block_statement ::=
+		local_variable_declaration_statement
+	|	statement
+	;
+local_variable_declaration_statement ::=
+		type variable_declarators SEMICOLON
+	|	type error 
+			{: parser.report_error("local_variable_declaration_statement","WRONG"); :} 
+		SEMICOLON
+	;
+statement ::=
+		statement_without_trailing_substatement
+	|	if_then_statement
+	|	if_then_else_statement
+	|	while_statement
+	;
+statement_no_short_if ::=
+		statement_without_trailing_substatement
+	|	if_then_else_statement_no_short_if
+	|	while_statement_no_short_if
+	;
+statement_without_trailing_substatement ::=
+		block
+	|	empty_statement
+	|	expression_statement
+	|	return_statement
+	;
+empty_statement ::=
+		SEMICOLON
+	;
+expression_statement ::=
+		statement_expression SEMICOLON
+	;
+statement_expression ::=
+		assignment
+	|	method_invocation
+	|	class_instance_creation_expression
+	;
+M4 ::= 
+			{: if(parser.second) RESULT = new Labels(); :}
+	;
+M5 ::= 
+			{: if(parser.second) { Labels l = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-1)).value;
+			    			     parser.code.append(l.lTrue+":	; l_True\n");
+			   }
+			:}
+	;
+M6 ::= 
+			{: if(parser.second) { Labels l = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-4)).value;
+			    			     parser.code.append("	br label %"+l.lNext+"\n");
+			    			     parser.code.append(l.lFalse+":	; l_False\n");
+			   }
+			:}
+	;
+M7 ::= 
+			{: if(parser.second) { Labels l = new Labels();
+			    			     parser.code.append("	br label %"+l.lBegin+"\n");
+			    			     parser.code.append(l.lBegin+":	; l_Begin\n");
+						     RESULT = l;
+			   } 
+			:}
+	;
+if_then_statement ::=
+		IF LPAREN M4:l expression:e M5 RPAREN statement
+			{: if(parser.second) if(!e.type.isBool()) parser.sem_error(""+e.type, "NOT A BOOLEAN");
+						   else { parser.code.append("	br label %"+l.lFalse+"\n");
+							    parser.code.append(l.lFalse+":	; l_False\n");
+						   }	
+			:}
+	|	IF error 
+			{: parser.report_error("if_then_statement","WRONG"); :} 
+		M5 RPAREN statement
+	;
+if_then_else_statement ::=
+		IF LPAREN M4:l expression:e M5 RPAREN statement_no_short_if M6 ELSE statement
+			{: if(parser.second) if(!e.type.isBool()) parser.sem_error(""+e.type, "NOT A BOOLEAN");
+						   else { parser.code.append("	br label %"+l.lNext+"\n");
+							    parser.code.append(l.lNext+":	; l_Next\n");
+						   }	
+			:}
+	|	IF LPAREN M4 error 
+			{: parser.report_error("expression","WRONG"); :} 
+		M5 RPAREN statement_no_short_if ELSE statement
+	;
+if_then_else_statement_no_short_if ::=
+		IF LPAREN M4:l expression:e M5 RPAREN statement_no_short_if M6 ELSE statement_no_short_if
+			{: if(parser.second) if(!e.type.isBool()) parser.sem_error(""+e.type, "NOT A BOOLEAN");
+						   else { parser.code.append("	br label %"+l.lNext+"\n");
+							    parser.code.append(l.lNext+":	; l_Next\n");
+						   }	
+			:}
+	;
+while_statement ::=
+		WHILE LPAREN M7:l expression:e M5 RPAREN statement
+			{: if(parser.second) if(!e.type.isBool()) parser.sem_error(""+e.type, "NOT A BOOLEAN");
+						   else { parser.code.append("	br label %"+l.lBegin+"\n");
+							    parser.code.append(l.lFalse+":	; l_False\n");
+						   }	
+			:}
+	|	WHILE error 
+			{: parser.report_error("expression","WRONG"); :} 
+		M5 RPAREN statement
+	;
+while_statement_no_short_if ::=
+		WHILE LPAREN M7:l expression:e M5 RPAREN statement_no_short_if
+			{: if(parser.second) if(!e.type.isBool()) parser.sem_error(""+e.type, "NOT A BOOLEAN");
+						   else { parser.code.append("	br label %"+l.lBegin+"\n");
+							    parser.code.append(l.lFalse+":	; lFalse\n");
+						   }	
+			:}
+	;
+ M14 ::= 
+			{: if(parser.second) { Labels l = new Labels();
+						     l.bvalue = true;
+						     RESULT = l;
+			   } 
+			:} 
+	; 
+return_statement ::=
+		RETURN M14 expression_opt:e SEMICOLON
+			{: if(parser.second) { Type r = Method.getCurrent().getRange();
+						     if(e.type != r) if(e.type.isNumber() && r.isNumber()) { Type mt = Type.max(e.type, r);
+																 String t = mt.getCode();
+															 	 if(e.type != mt) { parser.code.append("		; return_statement\n");
+																			  e.load();
+									  						 				  String l = e.widen(mt);
+																			  parser.code.append("	store "+t+" "+l+", "+t+"*"+" %tmp\n");
+																			  parser.code.append("	"+Tmp.nv()+" = load "+t+"*"+" %tmp\n");
+																			  parser.code.append("	store "+t+" "+Tmp.lv()+", "+t+"*"+" %retval\n");
+																			  parser.code.append("	br label %return\n");
+																 }
+							  				 					 else  parser.sem_error(""+r+", "+e.type, "RANGE TYPE SHORTER THAN RETURNED TYPE");
+									   }
+							  		   else  parser.sem_error(""+r+", "+e.type, "INCOMPATIBLE TYPES");
+						     else { String t = e.type.getCode();
+								parser.code.append("		; return_statement\n");
+								e.load();
+								parser.code.append("	store "+e.locT+" "+e.locN+", "+t+"*"+" %tmp\n");
+								parser.code.append("	"+Tmp.nv()+" = load "+t+"*"+" %tmp\n");
+								parser.code.append("	store "+t+" "+Tmp.lv()+", "+t+"*"+" %retval\n");
+								parser.code.append("	br label %return\n");	
+						     }
+			   }
+			:}
+      ;
+
+// 7) Expressions
+primary ::=	
+		primary_no_new_array:e 
+			{: RESULT = e; :}
+	|	array_creation_expression:e 
+			{: RESULT = e; :}
+	;
+M11 ::=
+			{: if (parser.second) RESULT = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-1)).value; :}
+	;
+primary_no_new_array ::=
+		literal:e 
+			{: if((parser.second) && (e.type == Type.bool())) { Labels l = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-1)).value;									    
+											    if(!l.bvalue) if (e.locN.equals("true")) parser.code.append("	br label %"+l.lTrue+"\n");
+											    			else parser.code.append("	br label %"+l.lFalse+"\n"); 
+											    RESULT = new Exp(Type.bool(), e.locT, e.locN, l);
+			   }
+			   else RESULT = e; 
+			:}
+	|	THIS 
+			{: RESULT = new Exp(Type.reference(Name.getCurrentClass()), "", ""); :}
+	|	LPAREN M11:l expression:e RPAREN 
+			{: if((parser.second) && (e.type == Type.bool()) && (l!= null)) RESULT = new Exp(Type.bool(), e.locT, e.locN, l);
+			   else RESULT = e; 
+			:}
+	|	class_instance_creation_expression:e 
+			{: RESULT = e; :}
+	|	field_access:e
+			{: RESULT = e; :}
+	|	method_invocation:e 
+			{: if((parser.second) && (e.type == Type.bool())) { Labels l = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-1)).value;									    
+											    if(!l.bvalue) parser.code.append("	br i1 "+e.locN+", label %"+l.lTrue+", label %"+l.lFalse+"\n");
+											    l.bvDone = true;
+											    RESULT = new Exp(Type.bool(), e.locT, e.locN, l);
+			   }
+			   else RESULT = e; 
+			:}
+	|	array_access:e 
+			{: RESULT = e; :}
+	|	primitive_type DOT CLASS
+	|	VOID DOT CLASS
+	|	array_type DOT CLASS
+	|	name DOT CLASS
+	|	name DOT THIS
+	|	LPAREN M11 error
+			{: parser.report_error("primary_no_new_array","WRONG"); :} 
+		RPAREN
+	|	error
+ 			{: parser.report_error("primary_no_new_array","WRONG"); :}
+		DOT THIS 
+	;
+ class_instance_creation_expression ::=
+		NEW name:sn
+ 			{: if(parser.second) if(sn.rs != null) { Type t = sn.rs.getType();
+				    					     if(t.isName()) { Env e = ((Name)t).getEnv();
+			   	    	     		      				    Symb s1 = Env.get(sn.name, e);
+					     							    Type t1 = s1.getType();
+			   	    	     							    if(t1.isConstructor()) { parser.code.append("		; class_instance_creation_expression\n");																 
+																     parser.code.append("	"+Tmp.nv()+" = malloc %struct."+sn.name+"\n");																     
+												    } 
+									     }
+									   }
+			:}
+
+		LPAREN argument_list_opt:e2 RPAREN class_body_opt
+			{: if(parser.second) { if(sn.rs == null) { parser.sem_error(sn.name,"UNKNOWN NAME");
+				   		     			       RESULT = new Exp(Type.errortype(), "", "");
+			   			     }
+			   			     else { String objptr = Tmp.lv();
+								ListIterator l = e2.list.listIterator();
+								parser.code.append("		; constructor_invocation\n");
+								while (l.hasNext()) { Exp e = (Exp)l.next();
+											    if(e.locT.contains("*")) if(e.locN.endsWith("&")) e.locN = e.locN.replace('&', ' ').trim(); 
+											    				     else if(e.type.isArray()) { String t = ((Array)e.type).getBase().getCode()+"*";
+																				   parser.code.append("	"+Tmp.nv()+" = bitcast "+e.locT+" "+e.locN+" to "+t+"\n");
+ 	    																			   e.locT = t;
+																				   e.locN = Tmp.lv();
+																    }
+																    else if(!e.locT.startsWith("i8* getelementptr")) { parser.code.append("	"+Tmp.nv()+" = load "+e.locT+" "+e.locN+"\n");
+																			         				     	    e.locT = e.locT.replaceFirst("\\*", "");
+																								     	    e.locN = Tmp.lv();
+											    						   }
+								}
+								Type t = sn.rs.getType();
+				    		     		if (!t.isName()) { parser.sem_error(""+t, "NOT A CLASS");
+				    		           				 RESULT = new Exp(Type.errortype(), "", "");
+			   	    		     		}
+			   	    		     		else { Env e = ((Name)t).getEnv();
+			   	    	     		      	 Symb s1 = Env.get(sn.name, e);
+					     				 Type t1 = s1.getType();
+			   	    	     				 if(!t1.isConstructor()) { parser.sem_error(""+t1, "NOT A CONSTRUCTOR");
+				    			    	     		 		  	   RESULT = new Exp(Type.errortype(), "", "");
+			   	    	     			       }
+			          	     				 else if(((Constructor)t1).getDomain() != e2.type) { parser.sem_error(""+e2.type, "INCOMPATIBLE ARGUMENT IN CONSTRUCTOR INVOCATION "+sn.name);
+				    					 				  		     	    RESULT = new Exp(Type.errortype(), "", "");
+			   	  	   	    		     		}
+					   	    		            else if(!s1.isPublic() && !Name.getCurrentClass().isSubclass(sn.rs.getOwner())) { parser.sem_error(sn.name, "ILLEGAL ACCESS TO PRIVATE CONSTRUCTOR");
+				    					 				     			     	      			          RESULT = new Exp(Type.errortype(), "", "");
+						  	   		    	     }
+						  	   		    	     else { parser.code.append("	call void @"+sn.name+"("+"%struct."+sn.name+"* "+objptr);
+										     		l = e2.list.listIterator();
+										     		while(l.hasNext()) { Exp pe = (Exp)l.next();
+											    		 	 	   parser.code.append(", "+pe.locT+" "+pe.locN);
+										     		}
+										     		parser.code.append(")\n");
+												RESULT = new Exp(((Constructor)t1).getRange(), "%struct."+sn.name+"*", objptr);
+									    	    }
+			 	    		     		     }
+			   			     }
+			   }
+			   else RESULT = new Exp(Type.voidtype(), "", "");
+			:}
+//	|	primary DOT NEW IDENTIFIER LPAREN argument_list_opt RPAREN class_body_opt 
+	;
+class_body_opt ::=
+	|	class_body
+;
+argument_list_opt ::=
+			{: if(parser.second) RESULT = new ParamList(Type.voidtype(), new ArrayList()); :}
+	|	argument_list:eL
+			{: if(parser.second) RESULT = eL; :}
+	;
+argument_list ::=
+		expression:e
+ 			{: if(parser.second) { List l = new ArrayList();
+			   			     l.add(e);
+			   			     RESULT = new ParamList(e.type, l);
+			   } 
+			:}
+	|	argument_list:eL COMMA expression:e
+ 			{: if(parser.second) { eL.list.add(e);
+			   			     eL.type = Type.product(eL.type, e.type);
+			   			     RESULT = eL;
+			   } 
+			:}
+	|	error 
+			{: parser.report_error("argument_list","WRONG"); :} 
+		expression
+	;
+array_creation_expression ::=
+		NEW primitive_type:t1 dim_exprs:e2 dims_opt
+			{: if(parser.second) if(!e2.type.isInteger()) { parser.sem_error(""+e2.type, "NOT AN INTEGER");
+				    			 			 	RESULT = new Exp(Type.errortype(), "", "");
+		   				   }
+			   			   else try { int s = Integer.parseInt(e2.locN);
+								  parser.code.append("		; array_creation\n");									
+  								  parser.code.append("	"+Tmp.nv()+" = malloc ["+e2.locN+" x "+t1.getCode()+"]\n");
+								  Type t = Type.array(s, t1);
+								  String c = "["+s+" x "+t1.getCode()+"]*";
+							    	  RESULT = new Exp(t, c, Tmp.lv());
+						   	  }
+							  catch (Exception e) { parser.sem_error(""+e2.locN, "NOT AN INTEGER_LITERAL");
+				    			 			 	RESULT = new Exp(Type.errortype(), "", "");
+							  }
+			   else RESULT = new Exp(Type.voidtype(), "", "");
+			:}
+	|	NEW name:sn dim_exprs:e2 dims_opt
+			{: if(parser.second) if(!e2.type.isInteger()) { parser.sem_error(""+e2.type, "NOT AN INTEGER");
+				    			 			 	RESULT = new Exp(Type.errortype(), "", "");
+		   	   			   }
+			   			   else { if(sn.cs == null) { parser.sem_error(sn.name,"UNKNOWN NAME");
+				   			 			  	RESULT = new Exp(Type.errortype(), "", "");
+			   	    			    }
+			   	    			    else try { int s = Integer.parseInt(e2.locN);
+									   Type t1 = Type.reference(sn.cs.getType());
+								  	   parser.code.append("		; array_creation\n");									
+  								  	   parser.code.append("	"+Tmp.nv()+" = malloc ["+e2.locN+" x "+t1.getCode()+"]\n");
+								  	   Type t = Type.array(s, t1);
+								  	   String c = "["+s+" x "+t1.getCode()+"]*";
+							    	  	   RESULT = new Exp(t, c, Tmp.lv());
+						   	  	   }
+							  	   catch (Exception e) { parser.sem_error(""+e2.locN, "NOT AN INTEGER_LITERAL");
+				    			 			 		 RESULT = new Exp(Type.errortype(), "", "");
+							  	   }
+			   			   }
+			   else RESULT = new Exp(Type.voidtype(), "", "");
+			:}
+	;
+dim_exprs ::=
+		dim_expr:e
+			{: RESULT = e; :}
+	|	dim_exprs:e1 dim_expr:e2
+			{: RESULT = e1; :}
+	|	error 
+			{: parser.report_error("dim_expr","WRONG"); :} 
+		dim_expr
+	;
+dim_expr ::=	LBRACK expression:e RBRACK
+			{: RESULT = e; :}
+	;
+dims_opt ::=
+	|	dims
+	;
+dims ::=
+		LBRACK RBRACK
+	|	dims LBRACK RBRACK
+	;
+field_access ::=
+		primary:e DOT IDENTIFIER:n
+			{: if(parser.second) { if(!e.type.isReference()) { parser.sem_error(""+e.type, "NOT A REFERENCE");
+				    					 	    	   RESULT = new Exp(Type.errortype(), "", "");
+						     }
+				  		     else { Type r = ((Reference)e.type).getReferred();
+								if(!r.isName()) { parser.sem_error(""+r, "NOT A CLASS");
+				    					 	      RESULT = new Exp(Type.errortype(), "", "");
+						     		}
+								else { Symb s = Env.get(n, ((Name)r).getEnv()); 
+			   			     			 if(s == null){ parser.sem_error(n,"UNKNOWN NAME");
+				    	     				  		    RESULT = new Exp(Type.errortype(), "", "");
+			   			     			 } 
+			   			     			 else if(!s.isPublic() && !Name.getCurrentClass().isSubclass(s.getOwner())) { parser.sem_error(n, "ILLEGAL ACCESS TO PRIVATE FIELD");
+				    					 				     	     				 	     			RESULT = new Exp(Type.errortype(), "", "");
+						  	    			}
+				  			    			else RESULT = new Exp(s.getType(), "", "");
+						     		}								
+						     }
+			   }
+			   else RESULT = new Exp(Type.voidtype(), "", "");
+			:}
+	|	SUPER DOT IDENTIFIER:n
+			{: if(parser.second) { Name c = Name.getCurrentClass();
+						     String sn = c.getSuper();						     
+ 			   			     if(sn == null){ parser.sem_error(""+c,"NOT A SUBCLASS");
+				    	     				   RESULT = new Exp(Type.errortype(), "", "");
+			   			     }
+						     else {	Symb ss = Env.get(sn);
+								Name sc = (Name)ss.getType();
+						    		Symb s = Env.get(n, sc.getEnv());
+			   			     		if(s == null){ parser.sem_error(n,"UNKNOWN NAME");
+				    	     				  	   RESULT = new Exp(Type.errortype(), "", "");
+			   			     		} 
+				  			      else RESULT = new Exp(s.getType(), "", "");
+						     }
+			   }
+			   else RESULT = new Exp(Type.voidtype(), "", "");
+			:}
+//	|	name DOT SUPER DOT IDENTIFIER
+	;
+method_invocation ::=
+		name:sn LPAREN argument_list_opt:eL RPAREN
+			{: if(parser.second)
+					  parse: { if(sn.cs == null) { parser.sem_error(sn.name,"UNKNOWN NAME");
+				   	      			   	 RESULT = new Exp(Type.errortype(), "", "");
+			   			     }
+			   			     else { Name c = sn.cs.getOwner();
+								String cName = null;
+								if(c != null) cName = c.getName(); 
+								ListIterator l = eL.list.listIterator();
+								parser.code.append("		; method_invocation\n");
+								while (l.hasNext()) { Exp e = (Exp)l.next();
+											    if(e.locT.contains("*")) if(e.locN.endsWith("&")) e.locN = e.locN.replace('&', ' ').trim(); 
+											    				     else if(e.type.isArray()) { String t = ((Array)e.type).getBase().getCode()+"*";
+																				   parser.code.append("	"+Tmp.nv()+" = bitcast "+e.locT+" "+e.locN+" to "+t+"\n");
+ 	    																			   e.locT = t;
+																				   e.locN = Tmp.lv();
+																    }
+																    else if(!e.locT.startsWith("i8* getelementptr")) { if(e.locN.startsWith("getelementptr")) { parser.code.append("	"+Tmp.nv()+" = "+e.locN+"\n");
+														   																		   e.locN = Tmp.lv();
+																									    }
+																									  parser.code.append("	"+Tmp.nv()+" = load "+e.locT+" "+e.locN+"\n");
+																			         				     	  e.locT = e.locT.replaceFirst("\\*", "");
+																								     	  e.locN = Tmp.lv();
+											    						   }
+								}
+								if(sn.name.equals("printf")) parser.code.append("	"+Tmp.nv()+" = call i32 (i8*, ...)* @printf(");
+						   		else if(sn.name.equals("scanf")) parser.code.append("	"+Tmp.nv()+" = call i32 (i8*, ...)* @scanf(");
+							  	     else { Type t1 = sn.cs.getType();
+				    						if(!t1.isMethod()) { parser.sem_error(""+t1, "NOT A METHOD");
+				    		             			   		   RESULT = new Exp(Type.errortype(), "", "");
+													   break parse;
+			   	    						}
+										else { Type t3 = ((Method)t1).getRange();
+											 if(t3 == Type.voidtype()) parser.code.append("	call void @"+cName+"_"+sn.name+"("); 
+											 else parser.code.append("	"+Tmp.nv()+" = call "+t3.getCode()+" @"+cName+"_"+sn.name+"(");
+ 										}
+								     }
+								l = eL.list.listIterator();
+								if(sn.name.equals("scanf") || sn.name.equals("printf")) { Exp e = (Exp)l.next();
+											   						    parser.code.append(e.locT+" "+e.locN);
+								}
+								else { if(sn.cs == Env.get(sn.name)) if(Method.getCurrentName().equals("main")) parser.objLoc = "null";
+														 else parser.objLoc = "%this";
+									 parser.code.append("%struct."+cName+"* "+parser.objLoc);
+								}											
+								while(l.hasNext()) { Exp e = (Exp)l.next();
+											   parser.code.append(", "+e.locT+" "+e.locN);
+								}
+			   	    				if(sn.name.equals("printf")||sn.name.equals("scanf")){ parser.code.append(")\n");
+																	 RESULT = new Exp(Type.integer(), "", "");										  	 						 
+								}
+ 								else { 
+									 Type t1 = sn.cs.getType();
+									 Type t5 = ((Method)t1).getDomain();
+									 if(t5 != eL.type) { parser.sem_error(""+t5+", "+eL.type, "INCOMPATIBLE ARGUMENT IN METHOD INVOCATION "+sn.name);
+				    				             	  	   RESULT = new Exp(Type.errortype(), "", "");
+			   	  	   				 }
+					   				 else { parser.code.append(")\n");
+										  Type t4 = ((Method)t1).getRange();
+										  Labels lab = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-4)).value;
+									 	  RESULT = new Exp(t4, t4.getCode(), Tmp.lv(), lab);
+									 }
+								}
+			   			     }
+			   }
+			   else RESULT = new Exp(Type.voidtype(), "", "");
+			:}
+	|	primary:e1 DOT IDENTIFIER:n LPAREN argument_list_opt:eL RPAREN
+			{: if(parser.second) if(!e1.type.isReference()) { parser.sem_error(""+e1.type, "NOT A REFERENCE");
+				    		 	   			   	  RESULT = new Exp(Type.errortype(), "", "");
+			   			   }
+			   			   else { Type name = ((Reference)e1.type).getReferred();
+			   	   			    if (!name.isName()) { parser.sem_error(""+e1.type, "NOT A CLASS");
+				    		       	 			  RESULT = new Exp(Type.errortype(), "", "");
+			   	   			    }
+			   	   			    else { Name c = (Name)name;
+								     Symb sn = Env.get(n, c.getEnv()); 
+			   			     		     if(sn == null) { parser.sem_error(n,"UNKNOWN NAME"); 
+									       	    RESULT = new Exp(Type.errortype(), "", "");
+								     }
+			   			     		     else if (!sn.isPublic() && !Name.getCurrentClass().isSubclass(sn.getOwner())) { parser.sem_error(n, "ILLEGAL ACCESS TO PRIVATE ATTRIBUTE");
+				    					 				     			     	      		  		 RESULT = new Exp(Type.errortype(), "", "");
+						  	     		    }
+						  	     		    else { String cName = c.getName(); 
+										     ListIterator l = eL.list.listIterator();
+								 		     parser.code.append("		; method_invocation\n");
+										     parser.code.append("	"+Tmp.nv()+" = load "+e1.locT+" "+e1.locN+"\n");
+										     String obj_ptr = Tmp.lv();
+										     while (l.hasNext()) { Exp e = (Exp)l.next();
+												   		   if(e.locT.contains("*")) if(e.locN.endsWith("&")) e.locN = e.locN.replace('&', ' ').trim(); 
+											    				     	    		    else if(e.type.isArray()) { String t = ((Array)e.type).getBase().getCode()+"*";
+																				   	  		  parser.code.append("	"+Tmp.nv()+" = bitcast "+e.locT+" "+e.locN+" to "+t+"\n");
+ 	    																			   	  		  e.locT = t;
+																				   	  		  e.locN = Tmp.lv();
+																    	   		   }
+																    	   		   else if(!e.locT.startsWith("i8* getelementptr")) { if(e.locN.startsWith("getelementptr")) { parser.code.append("	"+Tmp.nv()+" = "+e.locN+"\n");
+														   																		   	  		  e.locN = Tmp.lv();
+																									    	   		   }
+																									  	   		   parser.code.append("	"+Tmp.nv()+" = load "+e.locT+" "+e.locN+"\n");
+																			         				     	  	   		   e.locT = e.locT.replaceFirst("\\*", "");
+																								     	  	   		   e.locN = Tmp.lv();
+											    						   	  	   }
+								     		    } 
+										    Type t1 = sn.getType();
+				    				     		    if(!t1.isMethod()) { parser.sem_error(""+t1, "NOT A METHOD");
+				    		             			   	  		 RESULT = new Exp(Type.errortype(), "", "");
+			   	    				     		    }
+								     		    else { Type t3 = ((Method)t1).getRange();
+											     if(t3 == Type.voidtype()) parser.code.append("	call void @"+cName+"_"+n+"("); 
+											     else parser.code.append("	"+Tmp.nv()+" = call "+t3.getCode()+" @"+cName+"_"+n+"(");
+								     		    	     l = eL.list.listIterator();
+								     		 	     parser.code.append("%struct."+cName+"* "+obj_ptr);											
+								  			     while(l.hasNext()) { Exp e = (Exp)l.next();
+											   			 	  parser.code.append(", "+e.locT+" "+e.locN);
+								 			     }
+								 		  	     Type t5 = ((Method)t1).getDomain();
+										 	     if(t5 != eL.type) { parser.sem_error(""+t5+", "+eL.type, "INCOMPATIBLE ARGUMENT IN METHOD INVOCATION "+n);
+				    				             	  				 RESULT = new Exp(Type.errortype(), "", "");
+			   	  	   						     }
+											     else { parser.code.append(")\n");
+											  	      Labels lab = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-4)).value;
+									 	  	   	      RESULT = new Exp(t3, t3.getCode(), Tmp.lv(), lab);
+								     		  	     }
+										    }
+									   }								     
+			   			          }
+			   }
+			   else RESULT = new Exp(Type.voidtype(), "", "");
+			:}
+	|	SUPER DOT IDENTIFIER:n LPAREN argument_list_opt:e RPAREN
+//	|	name DOT SUPER DOT IDENTIFIER LPAREN argument_list_opt RPAREN
+	;
+array_access ::=
+		name:sn LBRACK expression:e RBRACK
+			{: if(parser.second) { if(sn.cs == null) { parser.sem_error(sn.name,"UNKNOWN NAME");
+				   	      			   	 RESULT = new Exp(Type.errortype(), "", "");
+			   			     }
+			   			     else { Type t1 = sn.cs.getType();
+				    				if(!t1.isArray()) { parser.sem_error(""+t1, "NOT AN ARRAY");
+				    		 	   	    			  RESULT = new Exp(Type.errortype(), "", "");
+			   	    				}
+				   	    			else if(!e.type.isInteger()) { parser.sem_error(""+e.type, "NOT AN INTEGER");
+				    		       	   		 			 RESULT = new Exp(Type.errortype(), "", "");
+					  	   		     } 
+					  	   		     else { parser.code.append("		; array_access\n");
+										String locT = sn.cs.getLocT();
+										String locN = sn.cs.getLocN();
+										if(locT.endsWith("**")) { parser.code.append("	"+Tmp.nv()+" = load "+locT+" "+locN+"\n");
+														  locT = locT.replaceFirst("\\*", "");
+														  locN = Tmp.lv();
+					   	 								  sn.cs.putLocT(locT);
+					   	 								  sn.cs.putLocN(locN);
+										}
+										e.load();
+										String index = Tmp.lv();
+										if(locT.endsWith("]*")) parser.code.append("	"+Tmp.nv()+" = getelementptr "+locT+" "+locN+", i32 0, i32 "+index+"\n");
+										else parser.code.append("	"+Tmp.nv()+" = getelementptr "+locT+" "+locN+", i32 "+index+"\n");
+										Type t = ((Array)t1).getBase();
+										RESULT = new Exp(t, t.getCode()+"*", Tmp.lv());
+								     }
+			   			     }
+			   }
+			   else RESULT = new Exp(Type.voidtype(), "", "");
+			:}
+	|	primary_no_new_array:e1 LBRACK expression:e2 RBRACK
+			{: if(!e2.type.isInteger()) { parser.sem_error(""+e2.type, "NOT AN INTEGER");
+				    		            RESULT = new Exp(Type.errortype(), "", "");
+			   } 
+			   else RESULT = e1;
+			:}
+	;
+postfix_expression ::=
+		primary:e
+			{: RESULT = e; :}
+	|	name:sn
+			{: if(sn.cs == null) { parser.sem_error(sn.name,"UNKNOWN NAME");
+				   		     RESULT = new Exp(Type.errortype(), "", "");
+			   }
+			   else { if((parser.second) && (sn.cs.getType() == Type.bool())) { Labels l = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-1)).value;									    
+											    	     		  if(!l.bvalue) parser.code.append("	br i1 "+sn.cs.getLocN()+", label %"+l.lTrue+", label %"+l.lFalse+"\n");
+											    	     		  RESULT = new Exp(Type.bool(), sn.cs.getLocT(), sn.cs.getLocN(), l);
+			   	    }
+				    else RESULT = new Exp(sn.cs.getType(), sn.cs.getLocT(), sn.cs.getLocN()); 
+			   }
+			:}
+	|	AT name:sn
+			{: if(sn.cs == null) { parser.sem_error(sn.name,"UNKNOWN NAME");
+				   		     RESULT = new Exp(Type.errortype(), "", "");
+			   }
+			   else RESULT = new Exp(Type.reference(sn.cs.getType()), sn.cs.getLocT(), sn.cs.getLocN()+"&"); 
+			:}
+	;
+M10 ::=
+			{: if(parser.second) { parser.code.append("		; unary_NOT_expression\n");
+			   			     RESULT = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-1)).value;
+			   }
+			:}
+	;
+unary_expression ::=
+		postfix_expression:e
+			{: RESULT = e; :}
+	|	NOT M10:l unary_expression:e
+			{: if(parser.second) if(!e.type.isBool()) { parser.sem_error(""+e.type, "NOT A BOOLEAN");
+				    		   			   	  RESULT = new Exp(Type.errortype(), "", "");
+						   }	   
+			   			   else { String s = l.lTrue;
+			   			     	    l.lTrue = l.lFalse;
+			   			     	    l.lFalse = s;
+ 							    RESULT = new Exp(Type.bool(), l);
+						   }						    
+			:}
+	|	PLUS unary_expression:e
+			{: if(parser.second) if(!e.type.isNumber()) { parser.sem_error(""+e.type, "NOT A NUMBER");
+				    		   			     	    RESULT = new Exp(Type.errortype(), "", "");
+						   }	   
+			   			   else  RESULT = e;						    
+			:}
+	|	MINUS unary_expression:e
+			{: if(parser.second) { if(!e.type.isNumber()) { parser.sem_error(""+e.type, "NOT A NUMBER");
+				    		   			     	    RESULT = new Exp(Type.errortype(), "", "");
+						   }	   
+			   			   parser.code.append("		; unary_minus_expression\n");
+						   e.load();
+						   String loc = ""+Tmp.nv();
+						   parser.code.append("	"+loc+" = sub "+e.locT+" 0"+", "+e.locN+"\n");
+						   Type t = e.type;
+						   RESULT = new Exp(t, t.getCode(), loc);
+			   }						    
+			:}
+	;
+multiplicative_expression ::=
+		unary_expression:e
+			{: RESULT = e; :}
+	|	multiplicative_expression:e1 MULT unary_expression:e2
+			{: if(parser.second) { boolean b1 = e1.type.isNumber();
+						     if(!b1) parser.sem_error(""+e1.type, "NOT A NUMBER");
+			   			     boolean b2 = e2.type.isNumber();
+						     if(!b2) parser.sem_error(""+e2.type, "NOT A NUMBER");
+				    		     if(b1 && b2) { parser.code.append("		; multiplicative_MULT_expression\n");
+									  e1.load();
+									  e2.load();
+									  String loc = ""+Tmp.nv();
+									  Type t = Type.max(e1.type, e2.type);
+									  String l1 = e1.widen(t);
+									  String l2 = e2.widen(t);
+									  parser.code.append("	"+loc+" = mul "+t.getCode()+" "+l1+", "+l2+"\n");						  
+									  RESULT = new Exp(t, t.getCode(), loc);
+						     }	   
+			   			     else  RESULT = new Exp(Type.errortype(), "", "");
+						   } 
+			:}
+	|	multiplicative_expression:e1 DIV unary_expression:e2
+			{: if(parser.second) { boolean b1 = e1.type.isNumber();
+						     if(!b1) parser.sem_error(""+e1.type, "NOT A NUMBER");
+			   			     boolean b2 = e2.type.isNumber();
+						     if(!b2) parser.sem_error(""+e2.type, "NOT A NUMBER");
+				    		     if(b1 && b2) { parser.code.append("		; multiplicative_DIV_expression\n");
+									  e1.load();
+									  e2.load();
+									  String loc = ""+Tmp.nv();
+									  Type t = Type.max(e1.type, e2.type);
+									  String l1 = e1.widen(t);
+									  String l2 = e2.widen(t);
+									  if(t.isFloating()) parser.code.append("	"+loc+" = fdiv "+t.getCode()+" "+l1+", "+l2+"\n");
+									  else parser.code.append("	"+loc+" = sdiv "+t.getCode()+" "+l1+", "+l2+"\n");					  
+									  RESULT = new Exp(t, t.getCode(), loc);
+						     }   
+			   			     else  RESULT = new Exp(Type.errortype(), "", "");
+						   } 
+			:}
+	|	multiplicative_expression:e1 MOD unary_expression:e2
+			{: if(parser.second) { boolean b1 = e1.type.isInteger();
+						     if(!b1) parser.sem_error(""+e1.type, "NOT AN INTEGER");
+			   			     boolean b2 = e2.type.isInteger();
+						     if(!b2) parser.sem_error(""+e2.type, "NOT AN INTEGER");
+				    		     if(b1 && b2) { parser.code.append("		; multiplicative_MOD_expression\n");
+									  e1.load();
+									  e2.load();
+									  String loc = ""+Tmp.nv();
+									  parser.code.append("	"+loc+" = srem i32 "+e1.locN+", "+e2.locN+"\n");					  
+									  RESULT = new Exp(e1.type, "i32", loc);
+						     }   	   
+			   			     else  RESULT = new Exp(Type.errortype(), "", "");
+						   } 
+			:}
+	|	error 
+			{: parser.report_error("multiplicative_expression","WRONG"); :} 
+		MULT unary_expression
+	|	error 
+			{: parser.report_error("multiplicative_expression","WRONG"); :} 
+		DIV unary_expression	
+	|	error 
+			{: parser.report_error("multiplicative_expression","WRONG"); :} 
+		MOD unary_expression
+	;
+additive_expression ::=
+		multiplicative_expression:e
+			{: RESULT = e; :}
+	|	additive_expression:e1 PLUS multiplicative_expression:e2
+			{: if(parser.second) { boolean b1 = e1.type.isNumber();
+						     if(!b1) parser.sem_error(""+e1.type, "NOT A NUMBER");
+			   			     boolean b2 = e2.type.isNumber();
+						     if(!b2) parser.sem_error(""+e2.type, "NOT A NUMBER");
+				    		     if(b1 && b2) { parser.code.append("		; additive_PLUS_expression\n");
+									  e1.load();
+									  e2.load();
+									  String loc = ""+Tmp.nv();
+									  Type t = Type.max(e1.type, e2.type);
+									  String l1 = e1.widen(t);
+									  String l2 = e2.widen(t);
+									  parser.code.append("	"+loc+" = add "+t.getCode()+" "+l1+", "+l2+"\n");
+									  RESULT = new Exp(t, t.getCode(), loc);
+						     }	   
+			   			     else  RESULT = new Exp(Type.errortype(), "", "");
+						   } 
+			:}
+	|	additive_expression:e1 MINUS multiplicative_expression:e2
+			{: if(parser.second) { boolean b1 = e1.type.isNumber();
+						     if(!b1) parser.sem_error(""+e1.type, "NOT A NUMBER");
+			   			     boolean b2 = e2.type.isNumber();
+						     if(!b2) parser.sem_error(""+e2.type, "NOT A NUMBER");
+				    		     if(b1 && b2) { parser.code.append("		; additive_MINUS_expression\n");
+									  e1.load();
+									  e2.load();
+									  String loc = ""+Tmp.nv();
+									  Type t = Type.max(e1.type, e2.type);
+									  String l1 = e1.widen(t);
+									  String l2 = e2.widen(t);
+									  parser.code.append("	"+loc+" = sub "+t.getCode()+" "+l1+", "+l2+"\n");
+									  RESULT = new Exp(t, t.getCode(), loc);
+						     }	   
+			   			     else  RESULT = new Exp(Type.errortype(), "", "");
+						   } 
+			:}
+	;
+relational_expression ::=
+		additive_expression:e
+			{: RESULT = e; :}
+	|	relational_expression:e1 LT additive_expression:e2
+			{: if(parser.second) { boolean b1 = e1.type.isNumber();
+						     if(!b1) parser.sem_error(""+e1.type, "NOT A NUMBER");
+			   			     boolean b2 = e2.type.isNumber();
+						     if(!b2) parser.sem_error(""+e2.type, "NOT A NUMBER");
+				    		     if(b1 && b2) { parser.code.append("		; relational_LT_expression\n");
+									  Labels l = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-3)).value;
+									  e1.load();
+									  e2.load();
+									  Type t = Type.max(e1.type, e2.type);
+									  String l1 = e1.widen(t);
+									  String l2 = e2.widen(t);
+									  parser.code.append("	"+Tmp.nv()+" = icmp slt "+t.getCode()+" "+l1+", "+l2+"\n");
+									  parser.code.append("	br i1 "+Tmp.lv()+", label %"+l.lTrue+", label %"+l.lFalse+"\n");
+									  RESULT = new Exp(Type.bool(), "i1", Tmp.lv(), l);
+						     }	   
+			   			     else  RESULT = new Exp(Type.errortype(), "", "");
+						   } 
+			:}
+	|	relational_expression:e1 GT additive_expression:e2
+			{: if(parser.second) { boolean b1 = e1.type.isNumber();
+						     if(!b1) parser.sem_error(""+e1.type, "NOT A NUMBER");
+			   			     boolean b2 = e2.type.isNumber();
+						     if(!b2) parser.sem_error(""+e2.type, "NOT A NUMBER");
+				    		     if(b1 && b2) { parser.code.append("		; relational_GT_expression\n");
+									  Labels l = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-3)).value;
+									  e1.load();
+									  e2.load();
+									  Type t = Type.max(e1.type, e2.type);
+									  String l1 = e1.widen(t);
+									  String l2 = e2.widen(t);
+									  parser.code.append("	"+Tmp.nv()+" = icmp sgt "+t.getCode()+" "+l1+", "+l2+"\n");
+									  parser.code.append("	br i1 "+Tmp.lv()+", label %"+l.lTrue+", label %"+l.lFalse+"\n");
+									  RESULT = new Exp(Type.bool(), "i1", Tmp.lv(), l);
+						     }	   	   
+			   			     else  RESULT = new Exp(Type.errortype(), "", "");
+						   } 
+			:}
+	|	relational_expression:e1 LTEQ additive_expression:e2
+			{: if(parser.second) { boolean b1 = e1.type.isNumber();
+						     if(!b1) parser.sem_error(""+e1.type, "NOT A NUMBER");
+			   			     boolean b2 = e2.type.isNumber();
+						     if(!b2) parser.sem_error(""+e2.type, "NOT A NUMBER");
+				    		     if(b1 && b2) { parser.code.append("		; relational_LTEQ_expression\n");
+									  Labels l = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-3)).value;
+									  e1.load();
+									  e2.load();
+									  Type t = Type.max(e1.type, e2.type);
+									  String l1 = e1.widen(t);
+									  String l2 = e2.widen(t);
+									  parser.code.append("	"+Tmp.nv()+" = icmp sle "+t.getCode()+" "+l1+", "+l2+"\n");
+									  parser.code.append("	br i1 "+Tmp.lv()+", label %"+l.lTrue+", label %"+l.lFalse+"\n");
+									  RESULT = new Exp(Type.bool(), "i1", Tmp.lv(), l);
+						     }	   	   
+			   			     else  RESULT = new Exp(Type.errortype(), "", "");
+						   } 
+			:}
+	|	relational_expression:e1 GTEQ additive_expression:e2
+			{: if(parser.second) { boolean b1 = e1.type.isNumber();
+						     if(!b1) parser.sem_error(""+e1.type, "NOT A NUMBER");
+			   			     boolean b2 = e2.type.isNumber();
+						     if(!b2) parser.sem_error(""+e2.type, "NOT A NUMBER");
+				    		     if(b1 && b2) { parser.code.append("		; relational_GTEQ_expression\n");
+									  Labels l = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-3)).value;
+									  e1.load();
+									  e2.load();
+							  		  Type t = Type.max(e1.type, e2.type);
+									  String l1 = e1.widen(t);
+									  String l2 = e2.widen(t);
+									  parser.code.append("	"+Tmp.nv()+" = icmp sge "+t.getCode()+" "+l1+", "+l2+"\n");
+									  parser.code.append("	br i1 "+Tmp.lv()+", label %"+l.lTrue+", label %"+l.lFalse+"\n");
+									  RESULT = new Exp(Type.bool(), "i1", Tmp.lv(), l);
+						     }	   	   
+			   			     else  RESULT = new Exp(Type.errortype(), "", "");
+						   } 
+			:}
+	|	error 
+			{: parser.report_error("relational_expression","WRONG"); :} 
+		LT additive_expression
+	|	error 
+			{: parser.report_error("relational_expression","WRONG"); :} 
+		GT additive_expression
+	|	error 
+			{: parser.report_error("relational_expression","WRONG"); :} 
+		LTEQ additive_expression
+	|	error 
+			{: parser.report_error("relational_expression","WRONG"); :} 
+		GTEQ additive_expression
+	;
+equality_expression ::=
+		relational_expression:e
+			{: RESULT = e; :}
+	|	equality_expression:e1 EQEQ relational_expression:e2
+			{: if(parser.second) if(e1.type != e2.type) if(e1.type.isNumber() && e2.type.isNumber()) { parser.code.append("		; equality_EQEQ_expression\n");
+							    											 Labels l = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-3)).value;
+							    											 e1.load();
+							    											 e2.load();
+									  									 Type t = Type.max(e1.type, e2.type);
+									  									 String l1 = e1.widen(t);
+									  									 String l2 = e2.widen(t);
+							    											 parser.code.append("	"+Tmp.nv()+" = icmp eq "+t.getCode()+" "+l1+", "+l2+"\n");
+							    											 parser.code.append("	br i1 "+Tmp.lv()+", label %"+l.lTrue+", label %"+l.lFalse+"\n");
+							    											 RESULT = new Exp(Type.bool(), "i1", Tmp.lv(), l);
+							  			  }
+							  			  else { parser.sem_error(""+e1.type+", "+e2.type, "INCOMPATIBLE TYPES");
+				    						    	   RESULT = new Exp(Type.errortype(), "", "");
+			   			   	  			  }
+ 						   else { parser.code.append("		; equality_EQEQ_expression\n");
+							    Labels l = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-3)).value;
+							    e1.load();
+							    e2.load();
+							    parser.code.append("	"+Tmp.nv()+" = icmp eq "+e1.locT+" "+e1.locN+", "+e2.locN+"\n");
+							    parser.code.append("	br i1 "+Tmp.lv()+", label %"+l.lTrue+", label %"+l.lFalse+"\n");
+							    RESULT = new Exp(Type.bool(), "i1", Tmp.lv(), l);
+						   }	   	   
+			:}
+	|	equality_expression:e1 NOTEQ relational_expression:e2
+			{: if(parser.second) if(e1.type != e2.type) if(e1.type.isNumber() && e2.type.isNumber()) { parser.code.append("		; equality_NOTEQ_expression\n");
+							    											 Labels l = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-3)).value;
+							    											 e1.load();
+							    											 e2.load();
+									  									 Type t = Type.max(e1.type, e2.type);
+									  									 String l1 = e1.widen(t);
+									  									 String l2 = e2.widen(t);
+							    											 parser.code.append("	"+Tmp.nv()+" = icmp ne "+t.getCode()+" "+l1+", "+l2+"\n");
+							    											 parser.code.append("	br i1 "+Tmp.lv()+", label %"+l.lTrue+", label %"+l.lFalse+"\n");
+							    											 RESULT = new Exp(Type.bool(), "i1", Tmp.lv(), l);
+							  			  }
+							  			  else { parser.sem_error(""+e1.type+", "+e2.type, "INCOMPATIBLE TYPES");
+				    						    	   RESULT = new Exp(Type.errortype(), "", "");
+			   			   	  			  }
+ 						   else { parser.code.append("		; equality_NOTEQ_expression\n");
+							    Labels l = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-3)).value;
+							    e1.load();
+							    e2.load(); 
+							    parser.code.append("	"+Tmp.nv()+" = icmp ne "+e1.locT+" "+e1.locN+", "+e2.locN+"\n");
+							    parser.code.append("	br i1 "+Tmp.lv()+", label %"+l.lTrue+", label %"+l.lFalse+"\n");
+							    RESULT = new Exp(Type.bool(), "i1", Tmp.lv(), l);
+						   }	   
+			:}
+	|	error 
+			{: parser.report_error("equality_expression","WRONG"); :} 
+		EQEQ relational_expression
+	|	error 
+			{: parser.report_error("equality_expression","WRONG"); :} 
+		NOTEQ relational_expression
+	;
+M8 ::=
+			{: if(parser.second) { Labels l = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-2)).value;
+						     parser.code.append("		; conditional_and_expression\n");
+						     parser.code.append(l.lTrue+":	; l_True\n");
+						     l.lTrue = Tmp.nl();
+			   	    		     RESULT = l;
+			   }
+			:}
+	;
+conditional_and_expression ::=
+		equality_expression:e
+			{: RESULT = e; :}
+	|	conditional_and_expression:e1 ANDAND M8:l equality_expression:e2
+			{: if(parser.second) { boolean b1 = e1.type.isBool();
+						     if(!b1) parser.sem_error(""+e1.type, "NOT A BOOLEAN");
+			   			     boolean b2 = e2.type.isBool();
+						     if(!b2) parser.sem_error(""+e2.type, "NOT A BOOLEAN");
+				    		     if(b1 && b2) RESULT = e2;	   
+			   			     else  RESULT = new Exp(Type.errortype(), "", "");
+						   } 
+			:}
+	|	error 
+			{: parser.report_error("conditional_and_expression","WRONG"); :} 
+		ANDAND equality_expression
+	;
+M9 ::=
+			{: if(parser.second) { Labels l = (Labels)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-2)).value;
+						     parser.code.append("		; conditional_or_expression\n");
+						     parser.code.append(l.lFalse+":	; l_False\n");
+						     l.lFalse = Tmp.nl();
+			   	    		     RESULT = l;
+			   }
+			:}
+	;
+conditional_or_expression ::=
+		conditional_and_expression:e
+			{: RESULT = e; :}
+	|	conditional_or_expression:e1 OROR M9:l conditional_and_expression:e2
+			{: if(parser.second) { boolean b1 = e1.type.isBool();
+						     if(!b1) parser.sem_error(""+e1.type, "NOT A BOOLEAN");
+			   			     boolean b2 = e2.type.isBool();
+						     if(!b2) parser.sem_error(""+e2.type, "NOT A BOOLEAN");
+				    		     if(b1 && b2) RESULT = e2;	   
+			   			     else  RESULT = new Exp(Type.errortype(), "", "");
+						   } 
+			:}
+	|	error 
+			{: parser.report_error("conditional_or_expression","WRONG"); :} 
+		OROR conditional_and_expression
+	;
+M12 ::=
+			{: if(parser.second) { Exp e = (Exp)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-1)).value;
+						     parser.code.append("		; conditional_expression\n");
+						     if (e.lab.bvalue) { e.load();
+										 parser.code.append("	br i1 "+e.locN+", label %"+e.lab.lTrue+", label %"+e.lab.lFalse+"\n");
+						     }
+						     parser.code.append(e.lab.lTrue+": 	; l_True\n");
+						     RESULT = e.lab; 
+			   }
+			:}
+	;
+M13 ::=
+			{: if(parser.second) { Exp e1 = (Exp)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-4)).value;
+						     Exp e2 = (Exp)((java_cup.runtime.Symbol)CUP$mjavac$stack.elementAt(CUP$mjavac$top-1)).value;
+						     e2.load();
+						     parser.code.append("	br label %"+e1.lab.lNext+"\n");
+						     parser.code.append(e1.lab.lFalse+": 	; l_False\n");
+						     RESULT = e1.lab;
+			   }
+			:}
+	;
+conditional_expression ::=
+		conditional_or_expression:e
+			{: RESULT = e; :}
+	|	conditional_or_expression:e1 QUESTION M12 expression:e2 COLON M13 conditional_expression:e3
+			{: if(parser.second) { boolean b1 = e1.type.isBool();
+						     if(!b1) { parser.sem_error(""+e1.type, "NOT A BOOLEAN");
+								   RESULT = new Exp(Type.errortype(), "", "");
+						     }
+			   			     else if(e2.type != e3.type) if(e2.type.isNumber() && e3.type.isNumber()) { e2.load();
+							    											 	  e3.load();
+									  									 	  Type t = Type.max(e2.type, e3.type);
+									  									 	  String l2 = e2.widen(t);
+									  									 	  String l3 = e3.widen(t);
+												  							  parser.code.append("	br label %"+e1.lab.lNext+"\n");
+						     						  							  parser.code.append(e1.lab.lNext+": 	; l_Next\n");
+												  							  parser.code.append("	"+Tmp.nv()+" = phi "+t.getCode()+" ["+l2+", %"+e1.lab.lTrue+"] ,["+l3+", %"+e1.lab.lFalse+"]\n");
+											       							  RESULT = new Exp(t, t.getCode(), Tmp.lv());
+						     					   }
+							    				   else { parser.sem_error(""+e2.type+", "+e3.type, "INCOMPATIBLE TYPES");
+								     				    RESULT = new Exp(Type.errortype(), "", "");
+						     	    				   }
+				    		          else { e3.load();
+								     parser.code.append("	br label %"+e1.lab.lNext+"\n");
+						     		     parser.code.append(e1.lab.lNext+": 	; l_Next\n");
+								     parser.code.append("	"+Tmp.nv()+" = phi "+e2.locT+" ["+e2.locN+", %"+e1.lab.lTrue+"] ,["+e3.locN+", %"+e1.lab.lFalse+"]\n");
+								     RESULT = new Exp(e2.type, e2.type.getCode(), Tmp.lv());
+						     	    }	   
+						   } 
+			:}
+	|	error 
+			{: parser.report_error("conditional_expression","WRONG"); :} 
+		QUESTION expression COLON conditional_or_expression
+	;
+assignment_expression ::=
+		conditional_expression:e
+			{: RESULT = e; :}
+	|	assignment:e
+			{: RESULT = e; :}
+	;
+assignment ::=
+		left_hand_side:e1 EQ M14:l assignment_expression:e2
+			{: if(parser.second) if(e1.type.isArray()) { if(e1.type != e2.type) { parser.sem_error(""+e1.type+", "+e2.type, "INCOMPATIBLE TYPES");
+				    						    	   			    RESULT = new Exp(Type.errortype(), "", "");
+			   			   	  			   }
+										   else { Symb s = Env.get(e1.locN.replaceFirst("%", ""));
+											    s.putLocT(e2.locT);
+											    s.putLocN(e2.locN);
+										   }
+						   }
+						   else if(e1.type != e2.type) if(e1.type.isNumber() && e2.type.isNumber()) { Type t = Type.max(e1.type, e2.type);
+															 				if(e2.type != t) { parser.code.append("		; assignment\n");
+																						 e2.load();
+									  						 							 String l2 = e2.widen(t);
+							    	  														 parser.code.append("	store "+t.getCode()+" "+l2+", "+e1.locT+" "+e1.locN+"\n");
+							    	  														 RESULT = new Exp(e1.type, e1.locT, e1.locN, l);
+																			}
+							  				 								else { parser.sem_error(""+e1.type+", "+e2.type, "LEFT-HAND TYPE SHORTER THAN RIGHT-END TYPE");
+				    						    	   	  								 RESULT = new Exp(Type.errortype(), "", "");
+			   			   	  				 								}
+											 }
+							  				 else { parser.sem_error(""+e1.type+", "+e2.type, "INCOMPATIBLE TYPES");
+				    						    	   	  RESULT = new Exp(Type.errortype(), "", "");
+			   			   	  				 }
+			   			   	  else { parser.code.append("		; assignment\n");
+							    	   if(e2.type.isBool() && !e2.lab.bvDone) { parser.code.append(e2.lab.lTrue+":	; l_True\n");
+											   			   	  parser.code.append("	br label %"+e2.lab.lNext+"\n");
+											   			   	  parser.code.append(e2.lab.lFalse+":	; l_False\n");
+											   			  	  parser.code.append("	br label %"+e2.lab.lNext+"\n");
+											   			  	  parser.code.append(e2.lab.lNext+":	; l_Next\n");
+											  			   	  parser.code.append("	"+Tmp.nv()+" = phi i1 [true, %"+e2.lab.lTrue+"] ,[false, %"+e2.lab.lFalse+"]\n");
+											   			   	  e2.locT = "i1";
+											   			  	  e2.locN = Tmp.lv();
+							    	   }
+								   e2.load();
+							    	   parser.code.append("	store "+e2.locT+" "+e2.locN+", "+e1.locT+" "+e1.locN+"\n");
+							    	   RESULT = new Exp(e1.type, e1.locT, e1.locN, l);
+						   	 }
+			   else RESULT = new Exp(Type.voidtype(), "", "");
+			:}
+	|	error 
+			{: parser.report_error("left_hand_side","WRONG"); :} 
+		EQ assignment_expression
+	;
+left_hand_side ::=
+		name:sn
+			{: if(parser.second) { if(sn.cs == null) { parser.sem_error(sn.name,"UNKNOWN NAME");
+				   		 			   	 RESULT = new Exp(Type.errortype(), "", "");
+			   			     }
+			   			     else { String locN = sn.cs.getLocN();
+								if(locN.startsWith("getelementptr")) { String cn = Name.getCurrentClass().getName();
+														   parser.code.append("		; left_hand_side\n");
+														   locN = locN.replaceFirst("struct.+\\*", "struct."+cn+"*");
+														   parser.code.append("	"+Tmp.nv()+" = "+locN+"\n");
+														   locN = Tmp.lv();
+					   	 								   RESULT = new Exp(sn.cs.getType(), sn.cs.getLocT(), Tmp.lv());
+							      }
+								else RESULT = new Exp(sn.cs.getType(), sn.cs.getLocT(), sn.cs.getLocN());
+						     }
+
+			   }
+			   else RESULT = new Exp(Type.voidtype(), "", "");
+			:}
+	|	field_access:e
+			{: RESULT = e; :}
+	|	array_access:e
+			{: RESULT = e; :}
+	;
+expression_opt ::=
+	|	expression:e
+			{: RESULT = e; :}
+	;
+expression ::=
+		assignment_expression:e
+			{: RESULT = e; :}
+	;

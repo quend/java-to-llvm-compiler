@@ -1,0 +1,26 @@
+
+public class ArrayMax{
+
+  int max ( int[] a, int n) {
+  	int i, max;
+  	i = 0;
+  	max = -10000;
+  	while(i < n) { if(a[i] > max) max = a[i];
+			   i = i +1;
+  	}
+  	return max;
+  }
+
+  public void main () {
+  	int[] a;
+	int i, n;
+  	a = new int[5];
+  	i = 0;
+  	while(i < 5) { printf ("Enter an integer value: ");
+		     	   scanf ("%d", &n);
+		     	   a[i] = n;
+		     	   i = i +1;
+  	}
+  	printf ("max:  %d\n", max(a, 5));
+  }
+}
